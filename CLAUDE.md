@@ -153,23 +153,25 @@ find ~/.cache/huggingface/hub -path "*<model>*/config.json" -exec \
   python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['max_position_embeddings'])" {} \;
 ```
 
-**Declare the lower of the model ceiling and what the machine can hold.** Qwen3-14B reports 40960, but on a 24 GB M4 a prompt in that range exhausts GPU memory and kills the server (see below), so 32768 is the value that actually works. The model's limit and the machine's limit are different numbers and the smaller one governs.
+**Declare the lower of the model ceiling and what the machine can hold.** Qwen3-14B reports 40960, but on a 24 GB M4 that is more than the machine can serve: a 38,859-token prompt completes, while one in the 41k range exhausts GPU memory and kills the server (see below). 32768 is the value that actually works. The model's limit and the machine's limit are different numbers and the smaller one governs.
 
-#### MLX has no detectable context overflow
+#### MLX context overflow has two regimes
 
-`packages/ai/src/utils/overflow.ts` carries per-backend overflow regexes, and MLX cannot have one. Given a prompt beyond its context it does not reject, error, or truncate — it processes the whole thing past `max_position_embeddings` until the GPU runs out of memory, then the process aborts:
+Which one you hit depends on whether the oversized prompt fits in GPU memory, and only one of them is detectable. Measured against `mlx_lm.server` 0.31.3 serving `Qwen3-14B-4bit` on an M4 / 24 GB.
+
+**Over the declared window but within memory — detected.** A 38,859-token prompt against a declared `contextWindow` of 32768 completes normally with `stopReason: "stop"` and an honest `usage.input` of 38,859. `isContextOverflow(message, 32768)` returns `true` through the existing silent-overflow path (`usage.input > contextWindow`), the same one z.ai uses. No new pattern is needed; the current code already handles this, and it is the case ordinary use runs into.
+
+**Beyond what memory can hold — undetectable.** MLX never rejects or truncates. It prefills past `max_position_embeddings` until Metal reports insufficient memory and the process aborts mid-request:
 
 ```
 Prompt processing progress: 40960/50013
-"POST /v1/chat/completions HTTP/1.1" 200
 libc++abi: terminating due to uncaught exception of type std::runtime_error:
 [METAL] Command buffer execution failed: Insufficient Memory
-(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
 ```
 
-The client sees a dropped connection, not an error message, so none of the three detection paths in `isContextOverflow` apply — there is no `errorMessage` to match, no `usage` to compare against the window, and no length-stop. MLX belongs with Ollama's silent truncation under "unreliable detection", not in `OVERFLOW_PATTERNS`.
+`packages/ai` surfaces that as `errorMessage: "Connection error."`, which `isContextOverflow` correctly returns `false` for — a dropped socket is equally consistent with a crash or a network fault, so matching it would misclassify every server failure. Do not add a transport-error pattern to `OVERFLOW_PATTERNS`.
 
-The mitigation is entirely in configuration: declare a `contextWindow` the machine can hold and let compaction run before the limit is reached. A `KeepAlive` launchd agent also restarts the server after such a crash, which makes the failure easy to miss.
+Declaring a `contextWindow` the machine can actually hold keeps you in the first regime, where compaction runs on a detected overflow instead of the server dying. A `KeepAlive` launchd agent restarts it after such a crash, which makes the failure easy to miss.
 
 `models.json` is read at session start, so a changed `contextWindow` needs a restart — `/context` in a running session keeps reporting the old figure until then.
 

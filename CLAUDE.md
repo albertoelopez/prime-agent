@@ -99,11 +99,18 @@ There is no built-in Ollama / LM Studio / vLLM provider and nothing auto-detects
 Two things to preserve when touching this path:
 
 - **`compat` flags.** Many OpenAI-compatible servers reject the `developer` role and `reasoning_effort`; `compat.supportsDeveloperRole` / `compat.supportsReasoningEffort` (provider- or model-level) fall back to a `system` message and drop the effort param.
-- **Overflow matchers.** `packages/ai/src/utils/overflow.ts` carries per-server context-overflow regexes (llama.cpp, LM Studio, Ollama). Adding a backend usually means adding a matcher; Ollama truncates silently in some setups and cannot be detected at all.
+- **Overflow matchers.** `packages/ai/src/utils/overflow.ts` carries per-server context-overflow regexes (llama.cpp, LM Studio, Ollama). Adding a backend usually means adding a matcher. That file reports Ollama truncating silently in some setups, which was not reproduced here — do not restate it as established for this machine.
 
 Test caveat: `packages/ai/test/stream.test.ts` and `test/context-overflow.test.ts` shell out to a real local `ollama` binary — including `ollama pull gpt-oss:20b` — when one is on PATH. Set `PI_NO_LOCAL_LLM=1` to skip those blocks (`./test.sh` already does).
 
 #### Ollama setup notes
+
+> **Check which Ollama is serving before following any of this.** The Homebrew service and the
+> Ollama desktop app both bind `127.0.0.1:11434`, and whichever starts first wins. If the app is
+> installed it takes the port, the Homebrew service fails with `bind: address already in use`, and
+> every plist instruction below silently does nothing — the app ignores that plist and serves the
+> 4096 default. Confirm with `lsof -nP -iTCP:11434 -sTCP:LISTEN` (look at the binary path) and
+> `brew services list` (an `error` status means it lost the port).
 
 Two non-obvious things decide whether a local model works here at all.
 
@@ -115,7 +122,7 @@ Two non-obvious things decide whether a local model works here at all.
 ollama ps
 ```
 
-Raise the server side with `OLLAMA_CONTEXT_LENGTH`. Under a Homebrew launchd install, add it to the existing `EnvironmentVariables` dict and reload with `launchctl`, not `brew services restart` — the latter regenerates the plist from the formula and silently drops every custom variable (including `OLLAMA_FLASH_ATTENTION` and `OLLAMA_KV_CACHE_TYPE`), dropping you back to 4096:
+Raise the server side with `OLLAMA_CONTEXT_LENGTH`. Under a Homebrew launchd install, add it to the existing `EnvironmentVariables` dict and reload with `launchctl`, not `brew services restart`. Measured: that command regenerates the plist from the formula and drops `OLLAMA_CONTEXT_LENGTH`, putting you back at 4096. It does *not* drop `OLLAMA_FLASH_ATTENTION` or `OLLAMA_KV_CACHE_TYPE` — those are set by the formula's own `service` block, so regeneration restores them. Only genuinely custom variables are lost:
 
 ```bash
 P=~/Library/LaunchAgents/homebrew.mxcl.ollama.plist
@@ -123,7 +130,7 @@ P=~/Library/LaunchAgents/homebrew.mxcl.ollama.plist
 launchctl unload "$P" && launchctl load "$P"
 ```
 
-`OLLAMA_KV_CACHE_TYPE=q8_0` roughly halves KV-cache memory, which is what makes a long context affordable on a laptop. The setting is global to the Ollama server, so every model loads at that context.
+`OLLAMA_KV_CACHE_TYPE=q8_0` is a Homebrew formula default here, not something to add. It is widely reported to roughly halve KV-cache memory — not measured on this machine, so treat the factor as approximate. `OLLAMA_CONTEXT_LENGTH` is global to the server, so every model loads at that context.
 
 End-to-end check once configured:
 
@@ -198,7 +205,7 @@ Tested and rejected, so nobody re-downloads 31 GB to rediscover it:
 | `devstral:24b` | 14 GB | 18 GB | loaded 100% GPU but only 6.1 tok/s, 10% memory free |
 | `Qwen3-14B-4bit` | 8 GB | ~10 GB | 11.4 tok/s, machine stays comfortable |
 
-`sysctl iogpu.wired_limit_mb` reports what the GPU may claim, not what is free — macOS, the browser, and any other model server share the same unified memory. Sizing a model against that limit rather than against actual free memory is what put a 17 GB model into swap. The practical ceiling for weights on a 24 GB machine is 12–14 GB, so the 14B class is the right tier and 24B upward is not.
+`sysctl iogpu.wired_limit_mb` reports what the GPU may claim, not what is free — macOS, the browser, and any other model server share the same unified memory. Sizing a model against that limit rather than against actual free memory is what put a 17 GB model into swap. Extrapolating from the three rows above, the practical ceiling for weights on a 24 GB machine is somewhere around 12–14 GB — the boundary is not measured, only bracketed by 14 GB working and 17 GB failing, so the 14B class is the safe tier and 24B upward is not.
 
 Two smaller traps. Resident footprint runs well above download size once the KV cache is allocated — `devstral:24b` is a 14 GB download that occupies 18 GB at 32k context. And some models carry a large built-in chat template: the same 38-token prompt bills 1251 tokens against `devstral:24b`, overhead paid on every request.
 
@@ -211,7 +218,7 @@ Two smaller traps. Resident footprint runs well above download size once the KV 
 "defaultModel": "mlx-community/Qwen3-14B-4bit"
 ```
 
-A model id containing `/` is safe here because `resolveModel` compares provider and id as distinct fields, but it is *not* safe on the command line: `--model` splits on the first slash, so `--model mlx-community/Qwen3-14B-4bit` resolves provider `mlx-community` and fails. Pass `--provider` separately for such ids.
+A model id containing `/` is safe in settings, and also safe on the command line — verified: `--model mlx-community/Qwen3-14B-4bit` with no `--provider` resolves correctly. `resolveModel` only treats the prefix as a provider when it matches a *known* provider name, and otherwise falls through to an exact match on the full id. The hazard is narrower than it looks: a collision, where a model id begins with a real provider name (`openai/...`), which would be split rather than matched whole.
 
 Verify which model actually served a request with JSON mode rather than trusting the reply:
 

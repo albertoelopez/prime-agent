@@ -111,6 +111,14 @@ Test caveat: `packages/ai/test/stream.test.ts` and `test/context-overflow.test.t
 > every plist instruction below silently does nothing — the app ignores that plist and serves the
 > 4096 default. Confirm with `lsof -nP -iTCP:11434 -sTCP:LISTEN` (look at the binary path) and
 > `brew services list` (an `error` status means it lost the port).
+>
+> It is either/or, not both. To run the Homebrew service at a configured context, quit the app
+> (`killall Ollama` leaves its `ollama serve` child alive, so kill that too) and the service
+> reclaims the port with the plist environment intact. To keep the app instead, set its context
+> in its own Settings panel and disable the Homebrew service. Setting `OLLAMA_CONTEXT_LENGTH`
+> for the app does not work by any external route — it builds its server's environment
+> explicitly, passing only `OLLAMA_MODELS` and `OLLAMA_NO_CLOUD`, so `launchctl setenv` is
+> ignored. Verified on Ollama.app 0.33.2 (`com.electron.ollama`).
 
 Two non-obvious things decide whether a local model works here at all.
 

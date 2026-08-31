@@ -97,16 +97,45 @@ describe("isContextOverflow", () => {
 		expect(isContextOverflow(message, 200000)).toBe(false);
 	});
 
-	// mlx_lm.server aborts the whole process when a prompt exhausts GPU memory, so an
-	// oversized request surfaces as a dropped connection rather than a provider error.
-	// A transport failure is not evidence of overflow - it is equally consistent with a
-	// crash or a network fault - so these must stay unclassified.
+	function createStopMessage(input: number, output: number): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [],
+			api: "openai-completions",
+			provider: "mlx",
+			model: "mlx-community/Qwen3-14B-4bit",
+			usage: {
+				input,
+				output,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: input + output,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+	}
+
+	// MLX over the declared window but within memory: the request completes and usage is
+	// honest, so the silent-overflow case catches it. Observed against mlx_lm.server 0.31.3
+	// serving Qwen3-14B-4bit - 38,859 input tokens against a declared window of 32768.
+	it("detects MLX overflow that completes with honest usage", () => {
+		const message = createStopMessage(38859, 0);
+		expect(isContextOverflow(message, 32768)).toBe(true);
+		// Within a window the host could actually serve, the same response is not overflow.
+		expect(isContextOverflow(message, 40960)).toBe(false);
+	});
+
+	// MLX beyond what memory can hold aborts the process, and packages/ai reports the dropped
+	// connection as "Connection error.". A transport failure is not evidence of overflow - it is
+	// equally consistent with a crash or a network fault - so these must stay unclassified.
 	it.each([
+		"Connection error.", // observed from mlx_lm.server aborting mid-request
 		"fetch failed",
 		"terminated",
 		"socket hang up",
 		"read ECONNRESET",
-		"Error: connect ECONNREFUSED 127.0.0.1:8080",
 	])("does not treat transport failure %j as overflow", (errorMessage) => {
 		expect(isContextOverflow(createErrorMessage(errorMessage), 32768)).toBe(false);
 	});

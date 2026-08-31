@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Documented that MLX (`mlx_lm.server`) aborts instead of reporting context overflow, so overflow cannot be detected for that backend.
+- Documented MLX (`mlx_lm.server`) context overflow: detected through reported usage when the request completes, undetectable only when the server aborts on memory exhaustion.
 
 ## [0.7.2] - 2026-08-11
 

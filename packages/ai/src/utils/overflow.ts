@@ -27,9 +27,9 @@ import type { AssistantMessage } from "../types.js";
  *   with output=0 (no room left to generate). Detected via stopReason "length" + zero output +
  *   input filling the context window.
  * - Ollama: Some deployments truncate silently, others return errors like "prompt too long; exceeded max context length by X tokens"
- * - MLX (mlx_lm.server): Does NOT reject, error, or truncate. It prefills the entire prompt past
- *   the model's max_position_embeddings until the GPU runs out of memory, then the server process
- *   aborts. There is no error message to match - see the note below.
+ * - MLX (mlx_lm.server): Does NOT reject, error, or truncate. It prefills the whole prompt and
+ *   reports usage honestly, so an overflow that fits in memory is caught by the silent-overflow
+ *   case. Only a prompt large enough to exhaust GPU memory escapes detection - see the note below.
  */
 const OVERFLOW_PATTERNS = [
 	/prompt is too long/i, // Anthropic token overflow
@@ -101,20 +101,26 @@ const NON_OVERFLOW_PATTERNS = [
  * - Ollama: May truncate input silently for some setups, but may also return explicit
  *   overflow errors that match the patterns above. Silent truncation still cannot be
  *   detected here because we do not know the expected token count.
- * - MLX (mlx_lm.server): Not detectable at all. An oversized prompt is prefilled in full,
- *   past the model's own position limit, until Metal reports insufficient memory and the
- *   server aborts mid-request:
+ * - MLX (mlx_lm.server): Two regimes, and only one is detectable. Measured against
+ *   mlx_lm.server 0.31.3 serving Qwen3-14B-4bit (max_position_embeddings 40960) on a 24 GB host.
+ *
+ *   Over the declared window but within memory: the request completes. A 38,859 token prompt
+ *   against a declared contextWindow of 32768 returns stopReason "stop" with an honest
+ *   usage.input of 38,859, so case 2 below already returns true. No new pattern is needed, and
+ *   this is the case ordinary use runs into.
+ *
+ *   Beyond what memory can hold: MLX never rejects or truncates. It prefills past the model's
+ *   own position limit until Metal reports insufficient memory and the process aborts:
  *
  *     Prompt processing progress: 40960/50013
  *     libc++abi: terminating due to uncaught exception of type std::runtime_error:
  *     [METAL] Command buffer execution failed: Insufficient Memory
  *
- *   The client observes a dropped connection, so none of the three cases below apply: there
- *   is no errorMessage to match, no usage to compare against the context window, and no
- *   length stop. Do not add a transport-error pattern to work around this - a dropped socket
- *   is not evidence of overflow, and matching one would misclassify every server crash and
- *   network fault. The mitigation belongs in configuration: declare a contextWindow the host
- *   can actually hold so compaction runs before the limit is reached.
+ *   That surfaces as errorMessage "Connection error." with no usage, which none of the three
+ *   cases below match, and it should stay that way. Do not add a transport-error pattern - a
+ *   dropped socket is equally consistent with a crash or a network fault, so matching one would
+ *   misclassify every server failure. Declaring a contextWindow the host can actually hold keeps
+ *   overflow in the first regime, where compaction runs instead of the server dying.
  *
  * ## Custom Providers
  *

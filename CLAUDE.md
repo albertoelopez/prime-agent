@@ -50,7 +50,7 @@ Four npm workspaces, layered bottom-up. Root `tsconfig.json` maps the package na
 - **`packages/tui`** — terminal UI primitives: differential renderer, editor component, keybindings, autocomplete. No agent knowledge.
 - **`packages/ai`** — unified LLM API. `stream.ts` + `providers/*.ts` normalize every provider into one `AssistantMessageEventStream` (`text` / `tool_call` / `thinking` / `usage` / `stop`). Providers are lazily registered in `providers/register-builtins.ts`; credentials are detected in `env-api-keys.ts`. `providers/faux.ts` is the deterministic test provider.
 - **`packages/agent`** — provider-agnostic agent loop (`agent-loop.ts`, `agent.ts`): tool execution, queueing, state, transport abstraction.
-- **`packages/coding-agent`** — the Prime Agent product: CLI, daemon, session persistence, IPython kernel, TUI modes, skills, extensions, MCP.
+- **`packages/coding-agent`** — the Prime Agent product: CLI, daemon, session persistence, Python REPL kernel, TUI modes, skills, extensions, MCP.
 - **`prime-agent-runtime/`** — the Python side (`rlm` package) copied into `dist/` at build time and installed into the managed kernel venv.
 
 ### Process topology (packages/coding-agent)
@@ -63,7 +63,7 @@ client (interactive TUI / print / JSON / RPC)
       └─ daemon supervisor      src/modes/daemon/             sockets, routing, attachments, health, agent-message delivery
           ├─ catalog subprocess                               saved-session scans (failures don't touch live workers)
           └─ session worker     one root session tree per process
-              └─ AgentSessionRuntime → AgentSession → IPython kernel + RLM child sessions
+              └─ AgentSessionRuntime → AgentSession → Python REPL kernel + RLM child sessions
 ```
 
 - `AgentSession` (`src/core/agent-session.ts`) owns provider calls, queues, tools, compaction, goals, child lifecycles, and transcript writes. It is the center of gravity of the codebase.
@@ -73,7 +73,9 @@ client (interactive TUI / print / JSON / RPC)
 
 ### RLM (recursive subagents)
 
-`await rlm("prompt", name=..., model=...)` in the model's IPython cell travels over a Jupyter comm target (`host.request`) → `KernelManager` (`src/core/kernel/index.ts`) → typed dispatch in `src/core/rlm-runtime.ts` → `AgentSession.runRlmChild()`. The call returns a spawn handle at *admission*; it never returns the child's answer — results come back as explicit `agent_message` replies or files. Host-request responses go on the Jupyter **control** channel; using shell would deadlock the awaiting cell.
+`await rlm("prompt", name=..., model=...)` in the model's Python cell is shipped to the host as a `host_request` event over the runtime's stdio protocol → `ReplKernelManager` (`src/core/kernel/repl-manager.ts`) → typed validation in `src/core/rlm-runtime.ts` → `AgentSession.runRlmChild()`. The host answers with a `host_reply` carrying the same id. The call returns a spawn handle at *admission*; it never returns the child's answer — results come back as explicit `agent_message` replies or files.
+
+The kernel is `python -m rlm.repl`, a CPython REPL runtime exchanging newline-delimited JSON over stdio (protocol in `prime-agent-runtime/src/rlm/repl.md`). It replaced the Jupyter/ZeroMQ kernel, which is gone as of 0.8.1 — there is no comm target or control channel any more, so older notes about control-channel deadlocks no longer apply. `ReplKernelManager.execute()` is serialized: one namespace, one ordinary cell at a time. RLM children still run concurrently because each delegation is a distinct host request with its own child runtime. The model-facing tool is still named `ipython` (`src/core/tools/ipython.ts`) even though IPython itself is no longer involved.
 
 State ownership: the TypeScript host owns models, credentials, depth limits, the child registry, and usage attribution. The Python `rlm` shim is a thin bridge with no agent loop. Bundled Python skills (`goal`, `agent_message`, harness) are likewise host-bridge clients.
 
@@ -122,7 +124,7 @@ Test caveat: `packages/ai/test/stream.test.ts` and `test/context-overflow.test.t
 
 Two non-obvious things decide whether a local model works here at all.
 
-**The model must support tool calling.** Prime Agent drives everything through the IPython tool, so a completion-only or vision-only model cannot function as the agent no matter how it is configured. Check with `ollama show <model>` and look for `tools` under Capabilities before adding it to `models.json`.
+**The model must support tool calling.** Prime Agent drives everything through the `ipython` tool, so a completion-only or vision-only model cannot function as the agent no matter how it is configured. Check with `ollama show <model>` and look for `tools` under Capabilities before adding it to `models.json`.
 
 **The declared `contextWindow` must match what the server actually serves.** Ollama's default is 4096 regardless of the model's maximum, and it truncates silently rather than returning an overflow error — so a config claiming 32768 against a 4096 server degrades output with no diagnostic. 4096 is too small for the system prompt alone. Verify the real number by loading a model and reading the `CONTEXT` column:
 
@@ -149,7 +151,7 @@ prime-agent --provider ollama --model <id> --no-session -p "hi"  # round-trip th
 
 #### MLX on Apple Silicon
 
-`mlx_lm.server` exposes an OpenAI-compatible endpoint and works as a provider with no special handling — same `openai-completions` api and same `compat` flags as Ollama. Tool calling is supported: it returns a well-formed `tool_calls` array with `finish_reason: tool_calls`, and the full agent loop drives IPython through it.
+`mlx_lm.server` exposes an OpenAI-compatible endpoint and works as a provider with no special handling — same `openai-completions` api and same `compat` flags as Ollama. Tool calling is supported: it returns a well-formed `tool_calls` array with `finish_reason: tool_calls`, and the full agent loop drives the `ipython` tool through it.
 
 ```json
 "mlx": {

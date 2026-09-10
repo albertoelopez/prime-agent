@@ -108,19 +108,22 @@ Test caveat: `packages/ai/test/stream.test.ts` and `test/context-overflow.test.t
 #### Ollama setup notes
 
 > **Check which Ollama is serving before following any of this.** The Homebrew service and the
-> Ollama desktop app both bind `127.0.0.1:11434`, and whichever starts first wins. If the app is
-> installed it takes the port, the Homebrew service fails with `bind: address already in use`, and
-> every plist instruction below silently does nothing — the app ignores that plist and serves the
-> 4096 default. Confirm with `lsof -nP -iTCP:11434 -sTCP:LISTEN` (look at the binary path) and
-> `brew services list` (an `error` status means it lost the port).
+> Ollama desktop app both bind port 11434, and whichever starts first wins. The app is registered
+> as a login item, which is how it retook the port here after the Homebrew fix: the Homebrew
+> service then fails with `bind: address already in use`, and every plist instruction below
+> silently does nothing. Confirm with `lsof -nP -iTCP:11434 -sTCP:LISTEN` (look at the binary
+> path) and `brew services list` (an `error` status means it lost the port).
 >
 > It is either/or, not both. To run the Homebrew service at a configured context, quit the app
 > (`killall Ollama` leaves its `ollama serve` child alive, so kill that too) and the service
-> reclaims the port with the plist environment intact. To keep the app instead, set its context
-> in its own Settings panel and disable the Homebrew service. Setting `OLLAMA_CONTEXT_LENGTH`
-> for the app does not work by any external route — it builds its server's environment
-> explicitly, passing only `OLLAMA_MODELS` and `OLLAMA_NO_CLOUD`, so `launchctl setenv` is
-> ignored. Verified on Ollama.app 0.33.2 (`com.electron.ollama`).
+> reclaims the port with the plist environment intact — until the next login, while the app stays
+> a login item. To keep the app instead, configure it and disable the Homebrew service. The app
+> ignores the plist and `launchctl setenv`; it builds its server's environment from its own
+> settings in `~/Library/Application Support/Ollama/db.sqlite` (table `settings`). Its
+> `context_length` becomes `OLLAMA_CONTEXT_LENGTH` (4096 until changed), and enabling network
+> exposure evidently becomes `OLLAMA_HOST=0.0.0.0`, which puts the unauthenticated API on every
+> interface. It does not set `OLLAMA_FLASH_ATTENTION` or `OLLAMA_KV_CACHE_TYPE`, which the
+> Homebrew formula does. Verified on Ollama.app 0.33.2 (`com.electron.ollama`).
 
 Two non-obvious things decide whether a local model works here at all.
 
@@ -203,7 +206,7 @@ MLX is roughly 9–14% faster for the same weights. Benchmark with the *same* mo
 
 When timing a long prompt, compare total wall time, not `completion_tokens / elapsed` — at 18k tokens the request is dominated by prefill, so that ratio is not a generation rate and swings wildly between runs.
 
-Ollama's built-in MLX backend (0.19 preview, 0.30 stable) is a separate thing from `mlx_lm.server` and requires more than 32 GB of unified memory, so it is unavailable on smaller machines regardless of Ollama version.
+Ollama's built-in MLX backend is a separate thing from `mlx_lm.server`. Its 0.19 preview required more than 32 GB of unified memory; later releases were described as broadening hardware support, and the Ollama.app 0.33.2 installed here ships MLX runtimes (`mlx_metal_v3`, `mlx_metal_v4`). How it performs on this 24 GB machine has not been measured, so do not assume either way.
 
 #### Model sizing on a 24 GB machine
 
